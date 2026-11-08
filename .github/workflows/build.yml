@@ -35,9 +35,14 @@ jobs:
         with:
           toolchain: '1.99.0'
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
         with:
-          workspaces: artifacts/ironrdp-web-build
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/wasm-bindgen*
+            artifacts/ironrdp-web-build/target
+          key: wasm-arm64-rust199-bindgen126-${{ hashFiles('scripts/rdp-client-Cargo.lock', 'scripts/build_rdp_client.py', 'deps/patches/ironrdp-audio.patch') }}
       - name: Build the pinned IronRDP browser WASM
         run: |
           git init deps/ironrdp

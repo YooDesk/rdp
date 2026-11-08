@@ -37,7 +37,9 @@ def main():
 def build_client(args, source):
 
     digest = hashlib.sha256()
-    for path in sorted(source.rglob('*')):
+    # The existing digest was produced with WindowsPath's case-insensitive component ordering.
+    # Make that ordering explicit so the same pinned archive verifies on the Linux builder.
+    for path in sorted(source.rglob('*'), key=lambda value: tuple(part.casefold() for part in value.relative_to(source).parts)):
         if path.is_file():
             digest.update(path.relative_to(source).as_posix().encode() + b'\0' + path.read_bytes() + b'\0')
     if digest.hexdigest() != SOURCE_SHA256:
