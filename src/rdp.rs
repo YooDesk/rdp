@@ -1,6 +1,7 @@
 //! RDCleanPath协商与TLS字节桥；证书校验遵守统一开关，浏览器IronRDP负责NLA与解码。
 use crate::{business::remote::RemoteSession, connections::ConnectionTarget};
 use axum::extract::ws::{Message, WebSocket};
+use futures_util::{SinkExt, StreamExt};
 use ironrdp_rdcleanpath::{RDCleanPathPdu, VERSION_1};
 use rustls::{
     client::{
@@ -17,7 +18,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
 };
 
@@ -287,6 +288,63 @@ async fn system_verifier() -> Result<Arc<WebPkiServerVerifier>, String> {
     .map_err(|_| "certificate trust task failed".to_string())?
 }
 
+async fn relay_bytes<T>(socket: &mut WebSocket, tunnel: T) -> Result<(), String>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let (mut outgoing, mut incoming) = socket.split();
+    let (mut reader, mut writer) = tokio::io::split(tunnel);
+    let (pongs, mut pending_pongs) = tokio::sync::mpsc::channel(8);
+    // 任一方向的写入都可能填满对端窗口。两个泵保持反向读取，
+    // 让画面确认和剪贴板请求能够释放背压，避免互相等待。
+    let to_browser = async move {
+        let mut buffer = vec![0; 65536];
+        loop {
+            let message = tokio::select! {
+                pong = pending_pongs.recv() => match pong {
+                    Some(bytes) => Message::Pong(bytes),
+                    None => return Ok::<(), String>(()),
+                },
+                result = reader.read(&mut buffer) => match result {
+                    Ok(0) => return Ok(()),
+                    Ok(size) => Message::Binary(buffer[..size].to_vec().into()),
+                    Err(_) => return Err("RDP connection interrupted".into()),
+                },
+            };
+            tokio::time::timeout(Duration::from_secs(15), outgoing.send(message))
+                .await
+                .map_err(|_| "RDP browser write timed out".to_string())?
+                .map_err(|_| "RDP browser disconnected".to_string())?;
+        }
+    };
+    let to_target = async move {
+        while let Some(message) = incoming.next().await {
+            match message {
+                Ok(Message::Binary(bytes)) => {
+                    tokio::time::timeout(Duration::from_secs(15), writer.write_all(&bytes))
+                        .await
+                        .map_err(|_| "RDP target write timed out".to_string())?
+                        .map_err(|_| "RDP target disconnected".to_string())?;
+                }
+                Ok(Message::Ping(bytes)) => {
+                    tokio::time::timeout(Duration::from_secs(10), pongs.send(bytes))
+                        .await
+                        .map_err(|_| "RDP browser write timed out".to_string())?
+                        .map_err(|_| "RDP browser disconnected".to_string())?;
+                }
+                Ok(Message::Pong(_)) => {}
+                Ok(Message::Close(_)) => return Ok(()),
+                _ => return Err("invalid RDP stream frame".into()),
+            }
+        }
+        Ok(())
+    };
+    tokio::select! {
+        result = to_browser => result,
+        result = to_target => result,
+    }
+}
+
 /// 已授权WS上的一次RDP会话；取消/断开会关闭TLS，不触发自动重新登录。
 pub async fn stream(mut socket: WebSocket, session: Arc<RemoteSession>) {
     let operation = async {
@@ -374,15 +432,7 @@ pub async fn stream(mut socket: WebSocket, session: Arc<RemoteSession>) {
             .await
             .map_err(|_| "RDP browser disconnected")?;
         session.transition("active");
-        let (mut reader, mut writer) = tokio::io::split(tls);
-        let mut buffer = vec![0; 65536];
-        loop {
-            tokio::select! {
-                result=reader.read(&mut buffer)=>match result{Ok(0)=>break,Err(_)=>return Err("RDP connection interrupted".into()),Ok(n)=>{tokio::time::timeout(Duration::from_secs(15),socket.send(Message::Binary(buffer[..n].to_vec().into()))).await.map_err(|_|"RDP browser write timed out")?.map_err(|_|"RDP browser disconnected")?;}},
-                message=socket.recv()=>match message{Some(Ok(Message::Binary(bytes)))=>{tokio::time::timeout(Duration::from_secs(15),writer.write_all(&bytes)).await.map_err(|_|"RDP target write timed out")?.map_err(|_|"RDP target disconnected")?;},Some(Ok(Message::Ping(p)))=>{crate::http::send_ws_message(&mut socket, Message::Pong(p)).await.map_err(|_|"RDP browser disconnected")?;},Some(Ok(Message::Close(_)))|None=>break,_=>return Err("invalid RDP stream frame".into())}
-            }
-        }
-        Ok::<(), String>(())
+        relay_bytes(&mut socket, tls).await
     };
     let result = tokio::select! {biased; _=session.cancelled()=>Ok(()),result=operation=>result};
     if let Err(error) = result {
@@ -398,6 +448,65 @@ pub async fn stream(mut socket: WebSocket, session: Arc<RemoteSession>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn duplex_forwarding_reads_while_target_write_is_backpressured() {
+        use axum::{routing::get, Router};
+        use futures_util::{SinkExt, StreamExt};
+
+        let (proxy, mut target) = tokio::io::duplex(1024);
+        let proxy = Arc::new(Mutex::new(Some(proxy)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/",
+            get(move |upgrade: axum::extract::ws::WebSocketUpgrade| {
+                let proxy = proxy.lock().unwrap().take().unwrap();
+                async move {
+                    upgrade.on_upgrade(move |mut socket| async move {
+                        let _ = relay_bytes(&mut socket, proxy).await;
+                    })
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut browser, _) = tokio_tungstenite::connect_async(format!("ws://{address}/"))
+            .await
+            .unwrap();
+        let exercise = async {
+            browser
+                .send(tokio_tungstenite::tungstenite::Message::Binary(
+                    vec![81; 16384].into(),
+                ))
+                .await
+                .unwrap();
+            // 先消费一个字节，证明代理已开始超出目标窗口的大写入。
+            let mut first = [0];
+            target.read_exact(&mut first).await.unwrap();
+            assert_eq!(first, [81]);
+            let producer = async {
+                target.write_all(&vec![37; 16384]).await.unwrap();
+                let mut rest = vec![0; 16383];
+                target.read_exact(&mut rest).await.unwrap();
+                assert!(rest.iter().all(|value| *value == 81));
+            };
+            let consumer = async {
+                let mut received = Vec::new();
+                while received.len() < 16384 {
+                    if let tokio_tungstenite::tungstenite::Message::Binary(bytes) =
+                        browser.next().await.unwrap().unwrap()
+                    {
+                        received.extend_from_slice(&bytes);
+                    }
+                }
+                assert_eq!(received, vec![37; 16384]);
+                browser.close(None).await.unwrap();
+            };
+            tokio::join!(producer, consumer);
+        };
+        let result = tokio::time::timeout(Duration::from_secs(2), exercise).await;
+        server.abort();
+        result.expect("one blocked direction must not stop the reverse stream");
+    }
     #[test]
     fn rdp_certificate_confirmation_cannot_override_invalid_usage_time_or_signature() {
         let _ = rustls::crypto::ring::default_provider().install_default();
