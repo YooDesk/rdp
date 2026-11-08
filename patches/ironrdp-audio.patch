@@ -1,0 +1,299 @@
+diff --git a/crates/ironrdp-rdpsnd/src/client.rs b/crates/ironrdp-rdpsnd/src/client.rs
+index ca640db..f893091 100644
+--- a/crates/ironrdp-rdpsnd/src/client.rs
++++ b/crates/ironrdp-rdpsnd/src/client.rs
+@@ -17,6 +17,9 @@ pub trait RdpsndClientHandler: Send + core::fmt::Debug {
+ 
+     fn get_formats(&self) -> &[AudioFormat];
+ 
++    /// Actual client-advertised order after server intersection.
++    fn negotiated_formats(&mut self, _formats: &[AudioFormat]) {}
++
+     fn wave(&mut self, format_no: usize, ts: u32, data: Cow<'_, [u8]>);
+ 
+     fn set_volume(&mut self, volume: VolumePdu);
+@@ -104,7 +107,8 @@ impl Rdpsnd {
+             .iter()
+             .collect();
+         let formats: HashSet<_> = self.handler.get_formats().iter().collect();
+-        let formats = formats.intersection(&server_format).map(|&x| x.clone()).collect();
++        let formats: Vec<AudioFormat> = formats.intersection(&server_format).map(|&x| x.clone()).collect();
++        self.handler.negotiated_formats(&formats);
+ 
+         let pdu = pdu::ClientAudioFormatPdu {
+             version: self.version()?,
+diff --git a/crates/ironrdp-web/src/lib.rs b/crates/ironrdp-web/src/lib.rs
+index 664e42e..4e6bd26 100644
+--- a/crates/ironrdp-web/src/lib.rs
++++ b/crates/ironrdp-web/src/lib.rs
+@@ -15,6 +15,7 @@ extern crate getrandom2 as _;
+ extern crate getrandom4 as _;
+ extern crate time as _;
+ 
++mod yoodesk_audio;
+ mod canvas;
+ mod clipboard;
+ mod error;
+diff --git a/crates/ironrdp-web/src/session.rs b/crates/ironrdp-web/src/session.rs
+index b22e444..e949b4a 100644
+--- a/crates/ironrdp-web/src/session.rs
++++ b/crates/ironrdp-web/src/session.rs
+@@ -88,6 +88,7 @@ struct SessionBuilderInner {
+     printer_device_id: Option<u32>,
+     printer_driver_name: Option<String>,
+ 
++    audio_callback: Option<js_sys::Function>,
+     use_display_control: bool,
+     enable_credssp: bool,
+     outbound_message_size_limit: Option<usize>,
+@@ -129,6 +130,7 @@ impl Default for SessionBuilderInner {
+             printer_device_id: None,
+             printer_driver_name: None,
+ 
++            audio_callback: None,
+             use_display_control: false,
+             enable_credssp: true,
+             outbound_message_size_limit: None,
+@@ -246,6 +248,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
+             match ext;
+             |pcb: String| { self.0.borrow_mut().pcb = Some(pcb) };
+             |kdc_proxy_url: String| { self.0.borrow_mut().kdc_proxy_url = Some(kdc_proxy_url) };
++            |audio_callback: JsValue| { self.0.borrow_mut().audio_callback = audio_callback.dyn_into::<js_sys::Function>().ok(); };
+             |display_control: bool| { self.0.borrow_mut().use_display_control = display_control };
+             |enable_credssp: bool| { self.0.borrow_mut().enable_credssp = enable_credssp };
+             |outbound_message_size_limit: f64| {
+@@ -402,6 +405,8 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
+ 
+         let enable_credssp = self.0.borrow().enable_credssp;
+         config.enable_credssp = enable_credssp;
++        let audio_callback = self.0.borrow().audio_callback.clone();
++        config.enable_audio_playback = audio_callback.is_some();
+ 
+         let (input_events_tx, input_events_rx) = mpsc::unbounded();
+ 
+@@ -475,6 +480,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
+         let use_display_control = self.0.borrow().use_display_control;
+ 
+         let (connection_result, ws) = connect(ConnectParams {
++            audio_callback,
+             ws,
+             config,
+             proxy_auth_token: auth_token,
+@@ -1514,6 +1520,7 @@ struct ConnectParams {
+     /// Matches the `client_name` in the connector config; used as the
+     /// `computer_name` when constructing the `Rdpdr` processor.
+     computer_name: String,
++    audio_callback: Option<js_sys::Function>,
+     use_display_control: bool,
+ }
+ 
+@@ -1551,6 +1558,7 @@ fn macos_major_version_from_user_agent(user_agent: &str) -> Option<u32> {
+ 
+ async fn connect(
+     ConnectParams {
++        audio_callback,
+         ws,
+         config,
+         proxy_auth_token,
+@@ -1577,11 +1585,19 @@ async fn connect(
+         connector.attach_static_channel(CliprdrClient::new(Box::new(clipboard_backend)));
+     }
+ 
++    if let Some(callback) = audio_callback.clone() {
++        connector.attach_static_channel(Rdpsnd::new(Box::new(crate::yoodesk_audio::BrowserAudio::new(callback))));
++    } else if printer_backend.is_some() {
++        connector.attach_static_channel(Rdpsnd::new(Box::new(NoopRdpsndBackend)));
++    }
++
++    if printer_backend.is_none() && audio_callback.is_some() {
++        connector.attach_static_channel(Rdpdr::new(Box::new(ironrdp::rdpdr::NoopRdpdrBackend), computer_name.clone()));
++    }
+     if let Some(printer_backend) = printer_backend {
+         // Windows servers only speak on RDPDR when RDPSND is advertised too
+         // (MS-RDPEFS Appendix A<1>). We do not play audio in the web client,
+         // but the no-op RDPSND processor satisfies that channel dependency.
+-        connector.attach_static_channel(Rdpsnd::new(Box::new(NoopRdpsndBackend)));
+         connector.attach_static_channel(
+             Rdpdr::new(Box::new(printer_backend), computer_name).with_printer_driver(
+                 printer_device_id,
+@@ -1591,10 +1607,11 @@ async fn connect(
+         );
+     }
+ 
+-    if use_display_control {
+-        connector.attach_static_channel(
+-            DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new()))),
+-        );
++    if use_display_control || audio_callback.is_some() {
++        let mut dynamic = DrdynvcClient::new();
++        if use_display_control { dynamic = dynamic.with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new()))); }
++        if let Some(callback) = audio_callback { dynamic = dynamic.with_dynamic_channel(crate::yoodesk_audio::BrowserAudioDvc::new(callback)); }
++        connector.attach_static_channel(dynamic);
+     }
+ 
+     let (upgraded, server_public_key) =
+diff --git a/crates/ironrdp-web/src/yoodesk_audio.rs b/crates/ironrdp-web/src/yoodesk_audio.rs
+new file mode 100644
+index 0000000..eee6e36
+--- /dev/null
++++ b/crates/ironrdp-web/src/yoodesk_audio.rs
+@@ -0,0 +1,159 @@
++//! YooDesk browser audio adapter, MIT. RDPSND protocol remains in upstream IronRDP.
++//! JS callbacks stay thread-local; the Send backend contains only an ID and PCM formats.
++use ironrdp::dvc::{DvcClientProcessor, DvcEncode, DvcMessage, DvcProcessor};
++use ironrdp::pdu::{PduResult, encode_err};
++use ironrdp::rdpsnd::client::Rdpsnd;
++use ironrdp::rdpsnd::client::RdpsndClientHandler;
++use ironrdp::rdpsnd::pdu::{AudioFormat, PitchPdu, VolumePdu, WaveFormat};
++use ironrdp::svc::SvcProcessor;
++use ironrdp_core::{Encode, EncodeResult, WriteCursor, impl_as_any};
++use std::borrow::Cow;
++use std::cell::{Cell, RefCell};
++use std::collections::BTreeMap;
++use wasm_bindgen::JsValue;
++
++thread_local! {
++    static CALLBACKS: RefCell<BTreeMap<u64, js_sys::Function>> = const { RefCell::new(BTreeMap::new()) };
++    static NEXT: Cell<u64> = const { Cell::new(0) };
++}
++
++#[derive(Debug)]
++pub(crate) struct BrowserAudio {
++    id: u64,
++    formats: Vec<AudioFormat>,
++    negotiated: Vec<AudioFormat>,
++}
++
++impl BrowserAudio {
++    pub(crate) fn new(callback: js_sys::Function) -> Self {
++        let id = NEXT.with(|next| {
++            let id = next.get() + 1;
++            next.set(id);
++            id
++        });
++        CALLBACKS.with(|callbacks| callbacks.borrow_mut().insert(id, callback));
++        let mut formats = Vec::new();
++        for rate in [48000, 44100, 22050] {
++            for channels in [2, 1] {
++                formats.push(AudioFormat {
++                    format: WaveFormat::PCM,
++                    n_channels: channels,
++                    n_samples_per_sec: rate,
++                    n_avg_bytes_per_sec: rate * u32::from(channels) * 2,
++                    n_block_align: channels * 2,
++                    bits_per_sample: 16,
++                    data: None,
++                });
++            }
++        }
++        let backend = Self {
++            id,
++            formats,
++            negotiated: Vec::new(),
++        };
++        backend.notify("channel", &JsValue::TRUE, 0, 0);
++        backend
++    }
++
++    fn notify(&self, kind: &str, data: &JsValue, channels: u16, rate: u32) {
++        let callback = CALLBACKS.with(|callbacks| callbacks.borrow().get(&self.id).cloned());
++        if let Some(callback) = callback {
++            if callback
++                .call4(
++                    &JsValue::NULL,
++                    &JsValue::from_str(kind),
++                    data,
++                    &JsValue::from(channels),
++                    &JsValue::from(rate),
++                )
++                .is_err()
++            {
++                tracing::error!("Browser audio callback failed");
++            }
++        }
++    }
++}
++
++impl RdpsndClientHandler for BrowserAudio {
++    fn get_formats(&self) -> &[AudioFormat] {
++        &self.formats
++    }
++    fn negotiated_formats(&mut self, formats: &[AudioFormat]) {
++        self.negotiated = formats.to_vec();
++        self.notify("formats", &JsValue::from(formats.len() as u32), 0, 0);
++    }
++    fn wave(&mut self, index: usize, _timestamp: u32, data: Cow<'_, [u8]>) {
++        let Some(format) = self.negotiated.get(index) else {
++            self.notify(
++                "error",
++                &JsValue::from_str("Invalid negotiated audio format index"),
++                0,
++                0,
++            );
++            return;
++        };
++        if data.len() > 2 * 1024 * 1024 || data.len() % usize::from(format.n_block_align) != 0 {
++            self.notify("error", &JsValue::from_str("Invalid PCM audio block"), 0, 0);
++            return;
++        }
++        self.notify(
++            "pcm",
++            &js_sys::Uint8Array::from(data.as_ref()).into(),
++            format.n_channels,
++            format.n_samples_per_sec,
++        );
++    }
++    fn set_volume(&mut self, _volume: VolumePdu) {}
++    fn set_pitch(&mut self, _pitch: PitchPdu) {}
++    fn close(&mut self) {
++        self.notify("close", &JsValue::NULL, 0, 0);
++    }
++}
++
++impl Drop for BrowserAudio {
++    fn drop(&mut self) {
++        CALLBACKS.with(|callbacks| callbacks.borrow_mut().remove(&self.id));
++    }
++}
++
++/// MS-RDPEA: modern Windows opens AUDIO_PLAYBACK_DVC instead of sending on rdpsnd SVC.
++pub(crate) struct BrowserAudioDvc(Rdpsnd);
++impl BrowserAudioDvc {
++    pub(crate) fn new(callback: js_sys::Function) -> Self {
++        Self(Rdpsnd::new(Box::new(BrowserAudio::new(callback))))
++    }
++}
++impl_as_any!(BrowserAudioDvc);
++impl DvcClientProcessor for BrowserAudioDvc {}
++impl DvcProcessor for BrowserAudioDvc {
++    fn channel_name(&self) -> &str {
++        "AUDIO_PLAYBACK_DVC"
++    }
++    fn start(&mut self, _id: u32) -> PduResult<Vec<DvcMessage>> {
++        Ok(Vec::new())
++    }
++    fn process(&mut self, _id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
++        self.0
++            .process(payload)?
++            .into_iter()
++            .map(|message| {
++                Ok(Box::new(AudioReply(
++                    message.encode_unframed_pdu().map_err(|e| encode_err!(e))?,
++                )) as DvcMessage)
++            })
++            .collect()
++    }
++}
++struct AudioReply(Vec<u8>);
++impl DvcEncode for AudioReply {}
++impl Encode for AudioReply {
++    fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
++        self.0.encode(dst)
++    }
++    fn name(&self) -> &'static str {
++        "RDPSND audio reply"
++    }
++    fn size(&self) -> usize {
++        self.0.len()
++    }
++}

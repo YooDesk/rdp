@@ -42,7 +42,7 @@ jobs:
             ~/.cargo/git
             ~/.cargo/bin/wasm-bindgen*
             artifacts/ironrdp-web-build/target
-          key: wasm-arm64-rust199-bindgen126-${{ hashFiles('scripts/rdp-client-Cargo.lock', 'scripts/build_rdp_client.py', 'deps/patches/ironrdp-audio.patch') }}
+          key: wasm-arm64-rust199-bindgen126-${{ hashFiles('scripts/rdp-client-Cargo.lock', 'scripts/build_rdp_client.py', 'patches/ironrdp-audio.patch') }}
       - name: Build the pinned IronRDP browser WASM
         run: |
           git init deps/ironrdp

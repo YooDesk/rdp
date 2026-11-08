@@ -56,7 +56,7 @@ def build_client(args, source):
         text = text[:text.index('[patch.crates-io]')]
         manifest.write_text(text, encoding='utf-8', newline='\n')
     # 仅修改隔离构建副本；逐文件核对固定上游源码或可重现的本地音频补丁。
-    audio_patch = ROOT / 'deps/patches/ironrdp-audio.patch'
+    audio_patch = ROOT / 'patches/ironrdp-audio.patch'
     if not (build / '.git').exists():
         subprocess.run(['git', 'init', '-q'], cwd=build, check=True)
     if subprocess.run(['git', 'apply', '--reverse', '--check', str(audio_patch)], cwd=build, capture_output=True).returncode:
