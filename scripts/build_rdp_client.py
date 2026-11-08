@@ -65,7 +65,7 @@ def build_client(args, source):
     if lock.exists():
         shutil.copyfile(lock, build / 'Cargo.lock')
     env = os.environ.copy()
-    env['RUSTUP_TOOLCHAIN'] = 'stable'
+    env.setdefault('RUSTUP_TOOLCHAIN', '1.99.0')
     command = ['cargo', 'build', '-p', 'ironrdp-web', '--target', 'wasm32-unknown-unknown', '--profile', 'production-wasm']
     if lock.exists():
         command.append('--locked')
