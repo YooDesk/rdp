@@ -45,8 +45,8 @@ def build_client(args, source):
     if digest.hexdigest() != SOURCE_SHA256:
         raise RuntimeError('Source must be the unmodified official archive for ' + COMMIT)
     build = ROOT / 'artifacts/ironrdp-web-build'
-    if not build.exists():
-        shutil.copytree(source, build, ignore=shutil.ignore_patterns('.git', 'target', 'node_modules'))
+    if not (build / 'Cargo.toml').is_file():
+        shutil.copytree(source, build, ignore=shutil.ignore_patterns('.git', 'target', 'node_modules'), dirs_exist_ok=True)
         manifest = build / 'Cargo.toml'
         text = manifest.read_text(encoding='utf-8')
         start = text.index('members = [')
