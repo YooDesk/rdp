@@ -49,7 +49,9 @@ jobs:
           git -C deps/ironrdp remote add origin https://github.com/Devolutions/IronRDP.git
           git -C deps/ironrdp fetch --depth 1 origin 11a0810cfbbabd8b8023875a05e3041216d4b01b
           git -C deps/ironrdp checkout --detach FETCH_HEAD
-          cargo install wasm-bindgen-cli --version 0.2.126 --locked
+          if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != 'wasm-bindgen 0.2.126' ]]; then
+            cargo install wasm-bindgen-cli --version 0.2.126 --locked --force
+          fi
           python scripts/build_rdp_client.py --wasm-bindgen "$(command -v wasm-bindgen)"
 
       - name: Build browser assets once for all native targets
