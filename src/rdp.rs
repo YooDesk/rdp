@@ -321,10 +321,15 @@ where
         while let Some(message) = incoming.next().await {
             match message {
                 Ok(Message::Binary(bytes)) => {
-                    tokio::time::timeout(Duration::from_secs(15), writer.write_all(&bytes))
-                        .await
-                        .map_err(|_| "RDP target write timed out".to_string())?
-                        .map_err(|_| "RDP target disconnected".to_string())?;
+                    // TLS may buffer the final bytes of a write. RDP can wait
+                    // for them before sending the next clipboard request.
+                    tokio::time::timeout(Duration::from_secs(15), async {
+                        writer.write_all(&bytes).await?;
+                        writer.flush().await
+                    })
+                    .await
+                    .map_err(|_| "RDP target write timed out".to_string())?
+                    .map_err(|_| "RDP target disconnected".to_string())?;
                 }
                 Ok(Message::Ping(bytes)) => {
                     tokio::time::timeout(Duration::from_secs(10), pongs.send(bytes))
@@ -454,7 +459,7 @@ mod tests {
         use futures_util::{SinkExt, StreamExt};
 
         let (proxy, mut target) = tokio::io::duplex(1024);
-        let proxy = Arc::new(Mutex::new(Some(proxy)));
+        let proxy = Arc::new(Mutex::new(Some(tokio::io::BufWriter::new(proxy))));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new().route(
@@ -473,6 +478,17 @@ mod tests {
             .await
             .unwrap();
         let exercise = async {
+            // Like TLS, the target writer can buffer a short final fragment.
+            // The target waits for it before requesting the next fragment.
+            browser
+                .send(tokio_tungstenite::tungstenite::Message::Binary(
+                    vec![19; 23].into(),
+                ))
+                .await
+                .unwrap();
+            let mut short = [0; 23];
+            target.read_exact(&mut short).await.unwrap();
+            assert_eq!(short, [19; 23]);
             browser
                 .send(tokio_tungstenite::tungstenite::Message::Binary(
                     vec![81; 16384].into(),
@@ -505,7 +521,7 @@ mod tests {
         };
         let result = tokio::time::timeout(Duration::from_secs(2), exercise).await;
         server.abort();
-        result.expect("one blocked direction must not stop the reverse stream");
+        result.expect("short writes must flush and a blocked write must not stop reverse traffic");
     }
     #[test]
     fn rdp_certificate_confirmation_cannot_override_invalid_usage_time_or_signature() {
