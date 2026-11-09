@@ -1,5 +1,9 @@
 import { $ } from './access.js';
 
+// Windows Explorer may acknowledge a file offer before its shell can handle
+// keyboard paste. Gate our shortcut only; serve native requests immediately.
+const FILE_PASTE_SETTLE_MS = 6000;
+
 // MS-RDPECLIP文件通道：上传按远端请求读取本地File切片，下载一次只请求一个64KiB块。
 export function rdpFiles({
   session,
@@ -24,7 +28,12 @@ export function rdpFiles({
   const requests = new Map();
   const locked = new Map();
   const uploadRequests = new Map();
-  let localBaseline, localRead;
+  let localBaseline, localRead, uploadReadyTimer;
+  function clearUploadReady() {
+    clearTimeout(uploadReadyTimer);
+    uploadReadyTimer = undefined;
+    uploadReady = false;
+  }
   function trackLocal() {
     localBaseline = undefined;
     if (!readLocal) return;
@@ -55,6 +64,7 @@ export function rdpFiles({
         uploads = [];
         remoteFiles = [];
         uploadUntil = 0;
+        clearUploadReady();
         localBaseline = undefined;
         render();
       })
@@ -88,7 +98,7 @@ export function rdpFiles({
     remoteFiles = [];
     clipId = undefined;
     uploadUntil = 0;
-    uploadReady = false;
+    clearUploadReady();
     if (download) download.cancelled = true;
     for (const item of requests.values()) {
       clearTimeout(item.timer);
@@ -142,7 +152,7 @@ export function rdpFiles({
     remoteFiles = files.map((file) => ({ ...file, name: safeName(file.name) }));
     uploads = [];
     uploadUntil = 0;
-    uploadReady = false;
+    clearUploadReady();
     trackLocal();
     clipId = id;
     render();
@@ -285,11 +295,11 @@ export function rdpFiles({
   }
   $('rdp-file-upload').onchange = () => {
     if (!enabled()) return;
+    clearUploadReady();
     const files = [...$('rdp-file-upload').files];
     if (!files.length) {
       uploads = [];
       uploadUntil = 0;
-      uploadReady = false;
       render();
       state('未选择文件');
       return;
@@ -297,7 +307,6 @@ export function rdpFiles({
     if (files.length > 64) {
       uploads = [];
       uploadUntil = 0;
-      uploadReady = false;
       render();
       state('一次最多选择 64 个文件', true);
       return;
@@ -305,14 +314,12 @@ export function rdpFiles({
     if (files.some((file) => file.name.length > 259 || /[\x00-\x1f<>:"\\/|?*]/.test(file.name))) {
       uploads = [];
       uploadUntil = 0;
-      uploadReady = false;
       render();
       state('所选文件名不符合 Windows 命名要求', true);
       return;
     }
     uploads = files;
     trackLocal();
-    uploadReady = false;
     uploadUntil = Infinity;
     render();
     try {
@@ -336,7 +343,7 @@ export function rdpFiles({
           if (current === epoch && uploads === files) {
             uploads = [];
             uploadUntil = 0;
-            uploadReady = false;
+            clearUploadReady();
             render();
             state(`未能准备文件复制：${error.message}`, true);
           }
@@ -345,6 +352,8 @@ export function rdpFiles({
     } catch (error) {
       uploads = [];
       uploadUntil = 0;
+      clearUploadReady();
+      render();
       state(error.message);
     }
   };
@@ -405,6 +414,7 @@ export function rdpFiles({
     if (!download) {
       uploads = [];
       uploadUntil = 0;
+      clearUploadReady();
       localBaseline = undefined;
       remoteFiles = [];
       render();
@@ -412,9 +422,21 @@ export function rdpFiles({
   }
   function formatReady(ok) {
     if (!uploads.length) return;
-    uploadReady = ok;
-    render();
-    state(ok ? '文件已就绪，点击“粘贴文件到远端”，或在远端按 Ctrl+V' : '远端拒绝文件复制', !ok);
+    clearUploadReady();
+    if (!ok) {
+      render();
+      state('远端拒绝文件复制', true);
+      return;
+    }
+    const selection = uploads, current = epoch, target = session();
+    state('正在等待远端资源管理器准备粘贴…');
+    uploadReadyTimer = setTimeout(() => {
+      uploadReadyTimer = undefined;
+      if (current !== epoch || selection !== uploads || target !== session() || !enabled()) return;
+      uploadReady = true;
+      render();
+      state('文件已就绪，点击“粘贴文件到远端”，或在远端按 Ctrl+V');
+    }, FILE_PASTE_SETTLE_MS);
   }
   async function paste(keys, textPaste) {
     await checkLocal();
@@ -422,12 +444,13 @@ export function rdpFiles({
       await textPaste?.();
       return;
     }
-    const current = epoch;
-    for (let n = 0; uploads.length && !uploadReady && n < 150; n++) {
+    const current = epoch, selection = uploads, target = session();
+    const valid = () => current === epoch && selection === uploads && target === session() && enabled() && focused();
+    for (let n = 0; selection.length && !uploadReady && n < 170; n++) {
       await new Promise((resolve) => setTimeout(resolve, 100));
-      if (current !== epoch || !enabled() || !focused()) return;
+      if (!valid()) return;
     }
-    if (current !== epoch || !enabled() || !focused()) return;
+    if (!valid()) return;
     if (uploads.length && !uploadReady) {
       state('远端尚未接受文件复制，请重新选择文件');
       return;
