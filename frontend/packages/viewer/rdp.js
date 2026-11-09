@@ -30,24 +30,49 @@ new MutationObserver(() => {
   $('audio').disabled = phase !== 'active' || !audioAvailable;
   if (phase !== 'active') audio.reset();
 }).observe($('status'), { attributes: true, attributeFilter: ['data-state'] });
-let clipboardReplies = [],
-  clipboardChannelReady = false;
-function clipboardAcceptance() {
-  if (clipboardReplies.length >= 4) return Promise.reject(Error('剪贴板同步繁忙'));
-  const item = {};
-  const promise = new Promise((resolve, reject) => {
-    item.resolve = resolve;
-    item.reject = reject;
-    item.timer = setTimeout(() => {
-      clipboardReplies = clipboardReplies.filter((p) => p !== item);
-      reject(Error('远端剪贴板确认超时'));
-    }, 10000);
+let clipboardReply = null,
+  clipboardPublishTail = Promise.resolve(),
+  clipboardChannelReady = false,
+  clipboardChannelUncertain = false;
+function publishClipboard(send, valid = () => true) {
+  const target = remote, gen = generation;
+  const operation = clipboardPublishTail.then(async () => {
+    if (target !== remote || gen !== generation || !controlling() || !clipboardChannelReady)
+      throw Error('剪贴板会话已变更');
+    if (!valid()) throw Error('文件选择已变更');
+    const item = {};
+    const confirmed = new Promise((resolve, reject) => {
+      item.resolve = resolve;
+      item.reject = reject;
+      item.timer = setTimeout(() => {
+        if (clipboardReply === item) {
+          clipboardReply = null;
+          clipboardChannelUncertain = true;
+          clipboardChannelReady = false;
+        }
+        reject(Error('远端剪贴板确认超时，请重新连接'));
+      }, 10000);
+    });
+    confirmed.catch(() => {});
+    clipboardReply = item;
+    try {
+      await Promise.all([send(target), confirmed]);
+    } catch (error) {
+      if (clipboardReply === item) {
+        clearTimeout(item.timer);
+        clipboardReply = null;
+        clipboardChannelUncertain = true;
+        clipboardChannelReady = false;
+        item.reject(error);
+      }
+      throw error;
+    }
   });
-  promise.catch(() => {});
-  clipboardReplies.push(item);
-  return promise;
+  clipboardPublishTail = operation.catch(() => {});
+  return operation;
 }
 function clipboardResponse(ok) {
+  if (clipboardChannelUncertain) return;
   // IronRDP首先发送空格式列表完成MS-RDPECLIP初始化；该确认不属于用户复制操作。
   if (!clipboardChannelReady) {
     if (ok) {
@@ -57,8 +82,9 @@ function clipboardResponse(ok) {
     } else message('远端未接受剪贴板通道初始化');
     return;
   }
-  const item = clipboardReplies.shift();
+  const item = clipboardReply;
   if (!item) return;
+  clipboardReply = null;
   clearTimeout(item.timer);
   if (ok) item.resolve();
   else item.reject(Error('远端拒绝剪贴板同步'));
@@ -68,13 +94,13 @@ const files = rdpFiles({
   engine: () => iron,
   enabled: () => controlling() && clipboardChannelReady,
   report: message,
-  acceptance: clipboardAcceptance,
+  publish: publishClipboard,
   focused: () =>
     document.hasFocus() && !document.hidden && $('rdp-viewport').contains(document.activeElement),
   readLocal: () => navigator.clipboard.readText(),
   pasteAction: () => {
     ime.focus();
-    void files.paste(pasteKeys, () => clipboard.paste(pasteKeys));
+    void files.paste(pasteKeys, undefined, {uploadOnly:true});
   },
   copyAction: () => {
     ime.focus();
@@ -246,11 +272,13 @@ function updateLock() {
 }
 async function disconnect(automatic = false) {
   clipboardChannelReady = false;
-  for (const item of clipboardReplies) {
-    clearTimeout(item.timer);
-    item.reject(Error('连接已断开'));
+  clipboardChannelUncertain = false;
+  if (clipboardReply) {
+    clearTimeout(clipboardReply.timer);
+    clipboardReply.reject(Error('连接已断开'));
   }
-  clipboardReplies = [];
+  clipboardReply = null;
+  clipboardPublishTail = Promise.resolve();
   resizeVersion++;
   clearTimeout(resizeTimer);
   if (!automatic) {
@@ -765,15 +793,15 @@ ime.addEventListener('paste', async (event) => {
 async function pasteClipboard(text) {
   if (!remote || !controlling()) return;
   if (new TextEncoder().encode(text).length > 1048576) throw Error('剪贴板文本不能超过 1 MiB');
-  const data = new iron.ClipboardData();
-  data.addText('text/plain', text);
-  const accepted = clipboardAcceptance();
-  try {
-    await remote.onClipboardPaste(data);
-    await accepted;
-  } finally {
-    data.free();
-  }
+  await publishClipboard(async target => {
+    const data = new iron.ClipboardData();
+    try {
+      data.addText('text/plain', text);
+      await target.onClipboardPaste(data);
+    } finally {
+      data.free();
+    }
+  });
 }
 $('mode').onchange = () => {
   files.reset();

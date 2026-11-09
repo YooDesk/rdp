@@ -10,7 +10,7 @@ export function rdpFiles({
   engine,
   enabled,
   report,
-  acceptance,
+  publish,
   focused = () => true,
   readLocal,
   pasteAction,
@@ -323,18 +323,19 @@ export function rdpFiles({
     uploadUntil = Infinity;
     render();
     try {
-      const accepted = acceptance(),
-        current = epoch;
-      invoke(
-        'initiate_file_copy',
-        files.map((file) => ({
-          name: file.name,
-          size: file.size,
-          lastModified: file.lastModified,
-          isDirectory: false,
-        })),
-      );
+      const current = epoch;
       state('正在准备文件复制');
+      const accepted = publish(() => {
+        invoke(
+          'initiate_file_copy',
+          files.map((file) => ({
+            name: file.name,
+            size: file.size,
+            lastModified: file.lastModified,
+            isDirectory: false,
+          })),
+        );
+      }, () => current === epoch && uploads === files && enabled());
       accepted.then(
         () => {
           if (current === epoch && uploads === files) formatReady(true);
@@ -438,8 +439,13 @@ export function rdpFiles({
       state('文件已就绪，点击“粘贴文件到远端”，或在远端按 Ctrl+V');
     }, FILE_PASTE_SETTLE_MS);
   }
-  async function paste(keys, textPaste) {
+  async function paste(keys, textPaste, {uploadOnly=false} = {}) {
+    const requested = uploads;
     await checkLocal();
+    if (uploadOnly && (!uploads.length || uploads !== requested)) {
+      state('文件选择已失效，请重新选择文件', true);
+      return;
+    }
     if (!uploads.length && !remoteFiles.length) {
       await textPaste?.();
       return;
