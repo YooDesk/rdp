@@ -19,6 +19,7 @@ let modulePromise = null,
 let inputQueue = [],
   pointer = null,
   inputFrame = 0,
+  pasteReleaseTimer = 0,
   lastLocks = '';
 const canvas = $('rdp-screen'),
   ime = $('rdp-ime');
@@ -116,9 +117,35 @@ const clipboard = textClipboard({
   report: message,
 });
 function pasteKeys() {
-  for (const code of [0x1d, 0x2f]) input(iron.DeviceEvent.keyPressed(code));
-  for (const code of [0x2f, 0x1d]) input(iron.DeviceEvent.keyReleased(code));
+  if (!controlling() || !remote || pasteReleaseTimer) return;
+  const target = remote, gen = generation;
+  const send = (codes, pressed) => {
+    const transaction = new iron.InputTransaction();
+    for (const code of codes)
+      transaction.addEvent(pressed ? iron.DeviceEvent.keyPressed(code) : iron.DeviceEvent.keyReleased(code));
+    target.applyInputs(transaction);
+  };
+  // Explorer can miss a Ctrl+V shortcut when both transitions are delivered
+  // in one RDP transaction. Release separately, before any later input.
   flush();
+  try {
+    send([0x1d, 0x2f], true);
+    pasteReleaseTimer = setTimeout(() => {
+      pasteReleaseTimer = 0;
+      if (target !== remote || gen !== generation) return;
+      if (!controlling()) { release(); return; }
+      try {
+        send([0x2f, 0x1d], false);
+        flush();
+      } catch (error) {
+        message(describe(error));
+        release();
+      }
+    }, 100);
+  } catch (error) {
+    message(describe(error));
+    release();
+  }
 }
 const profiles = connectionManager(async (items, saved) => {
   const old = $('target').value;
@@ -177,6 +204,8 @@ function clearInputs() {
   inputQueue = [];
 }
 function release() {
+  clearTimeout(pasteReleaseTimer);
+  pasteReleaseTimer = 0;
   clearInputs();
   pointer = null;
   cancelAnimationFrame(inputFrame);
@@ -563,6 +592,7 @@ function flush() {
     pointer = null;
     return;
   }
+  if (pasteReleaseTimer || (!inputQueue.length && !pointer)) return;
   try {
     const t = new iron.InputTransaction();
     for (const e of inputQueue) t.addEvent(e);
