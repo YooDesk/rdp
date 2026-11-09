@@ -56,11 +56,13 @@ def build_client(args, source):
         text = text[:text.index('[patch.crates-io]')]
         manifest.write_text(text, encoding='utf-8', newline='\n')
     # 仅修改隔离构建副本；逐文件核对固定上游源码或可重现的本地音频补丁。
-    audio_patch = ROOT / 'patches/ironrdp-audio.patch'
+    patches_to_apply = [ROOT / 'patches' / name for name in ('ironrdp-audio.patch', 'ironrdp-clipboard.patch')]
     if not (build / '.git').exists():
         subprocess.run(['git', 'init', '-q'], cwd=build, check=True)
-    if subprocess.run(['git', 'apply', '--reverse', '--check', str(audio_patch)], cwd=build, capture_output=True).returncode:
-        subprocess.run(['git', 'apply', str(audio_patch)], cwd=build, check=True)
+    for patch in patches_to_apply:
+        patch_data = patch.read_text(encoding='utf-8').encode('utf-8')
+        if subprocess.run(['git', 'apply', '--reverse', '--check', '-'], cwd=build, input=patch_data, capture_output=True).returncode:
+            subprocess.run(['git', 'apply', '-'], cwd=build, input=patch_data, check=True)
     lock = ROOT / 'scripts/rdp-client-Cargo.lock'
     if lock.exists():
         shutil.copyfile(lock, build / 'Cargo.lock')
@@ -82,8 +84,8 @@ def build_client(args, source):
         shutil.copyfile(source / name, output / name)
     files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in output.iterdir() if p.is_file() and p.name != 'source.json'}
     rustc = subprocess.check_output(['rustc', '--version'], text=True, env=env).strip()
-    patches = {audio_patch.name: hashlib.sha256(audio_patch.read_bytes()).hexdigest()}
-    (output / 'source.json').write_text(json.dumps({'upstream': 'https://github.com/Devolutions/IronRDP', 'commit': COMMIT, 'source_tree_sha256': SOURCE_SHA256, 'rustc': rustc, 'wasm_bindgen': BINDGEN, 'workspace_adaptation': 'only browser member; omit FFI-only Diplomat patch; YooDesk RDPSND PCM callback adapter', 'patches': patches, 'files': files}, indent=2)+'\n', encoding='utf-8')
+    patches = {patch.name: hashlib.sha256(patch.read_text(encoding='utf-8').encode('utf-8')).hexdigest() for patch in patches_to_apply}
+    (output / 'source.json').write_text(json.dumps({'upstream': 'https://github.com/Devolutions/IronRDP', 'commit': COMMIT, 'source_tree_sha256': SOURCE_SHA256, 'rustc': rustc, 'wasm_bindgen': BINDGEN, 'workspace_adaptation': 'only browser member; omit FFI-only Diplomat patch; YooDesk RDPSND PCM adapter and CLIPRDR read sequencing', 'patches': patches, 'files': files}, indent=2)+'\n', encoding='utf-8')
     print('Built IronRDP browser client from', COMMIT)
 
 

@@ -1,0 +1,118 @@
+--- a/crates/ironrdp-web/src/clipboard.rs
++++ b/crates/ironrdp-web/src/clipboard.rs
+@@ -12,6 +12,9 @@
+ //! will be requested, and when pasting into WordPad, "text/html" will be requested.
+ 
+ use std::collections::HashMap;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicU32, Ordering};
++use std::time::Duration;
+ 
+ use futures_channel::mpsc;
+ use iron_remote_desktop::ClipboardData as _;
+@@ -28,6 +31,9 @@
+ 
+ use crate::session::RdpInputEvent;
+ 
++// Windows can announce formats before the clipboard owner can render them.
++const REMOTE_CLIPBOARD_SETTLE: Duration = Duration::from_millis(1500);
++
+ const MIME_TEXT: &str = "text/plain";
+ const MIME_HTML: &str = "text/html";
+ const MIME_PNG: &str = "image/png";
+@@ -70,11 +76,15 @@
+ #[derive(Debug, Clone)]
+ pub(crate) struct WasmClipboardMessageProxy {
+     tx: mpsc::UnboundedSender<RdpInputEvent>,
++    remote_generation: Arc<AtomicU32>,
+ }
+ 
+ impl WasmClipboardMessageProxy {
+     pub(crate) fn new(tx: mpsc::UnboundedSender<RdpInputEvent>) -> Self {
+-        Self { tx }
++        Self {
++            tx,
++            remote_generation: Arc::new(AtomicU32::new(0)),
++        }
+     }
+ 
+     /// Send messages which require action on CLIPRDR SVC
+@@ -86,6 +96,12 @@
+ 
+     /// Send messages which require action on wasm clipboard backend
+     pub(crate) fn send_backend_message(&self, message: WasmClipboardBackendMessage) {
++        if matches!(
++            &message,
++            WasmClipboardBackendMessage::LocalClipboardChanged(_) | WasmClipboardBackendMessage::InitiateFileCopy { .. }
++        ) {
++            self.remote_generation.fetch_add(1, Ordering::Relaxed);
++        }
+         if self
+             .tx
+             .unbounded_send(RdpInputEvent::ClipboardBackend(message))
+@@ -102,7 +118,10 @@
+     LocalClipboardChanged(ClipboardData),
+     RemoteDataRequest(ClipboardFormatId),
+ 
+-    RemoteClipboardChanged(Vec<ClipboardFormat>),
++    RemoteClipboardChanged {
++        generation: u32,
++        formats: Vec<ClipboardFormat>,
++    },
+     RemoteDataResponse(FormatDataResponse<'static>),
+ 
+     ForceClipboardUpdate,
+@@ -617,7 +636,10 @@
+                 self.proxy
+                     .send_cliprdr_message(ClipboardMessage::SendFormatData(message));
+             }
+-            WasmClipboardBackendMessage::RemoteClipboardChanged(formats) => {
++            WasmClipboardBackendMessage::RemoteClipboardChanged { generation, formats } => {
++                if self.proxy.remote_generation.load(Ordering::Relaxed) != generation {
++                    return Ok(());
++                }
+                 match self.process_remote_clipboard_changed(formats) {
+                     Ok(Some(format)) => {
+                         // We start querying text/image formats right away. This is due to
+@@ -927,9 +949,20 @@
+     }
+ 
+     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
+-        self.send_event(WasmClipboardBackendMessage::RemoteClipboardChanged(
+-            available_formats.to_vec(),
+-        ));
++        let proxy = self.proxy.clone();
++        let generation = proxy.remote_generation.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
++        let formats = available_formats.to_vec();
++        // Acknowledge the FormatList normally, then read only the latest offer.
++        // Superseded offers never issue requests and a failed read is not replayed.
++        wasm_bindgen_futures::spawn_local(async move {
++            gloo_timers::future::sleep(REMOTE_CLIPBOARD_SETTLE).await;
++            if proxy.remote_generation.load(Ordering::Relaxed) == generation {
++                proxy.send_backend_message(WasmClipboardBackendMessage::RemoteClipboardChanged {
++                    generation,
++                    formats,
++                });
++            }
++        });
+     }
+ 
+     fn on_format_data_request(&mut self, request: FormatDataRequest) {
+@@ -1706,7 +1739,7 @@
+ 
+         let formats = vec![file_list_format(0xC080)];
+         clipboard
+-            .process_event(WasmClipboardBackendMessage::RemoteClipboardChanged(formats))
++            .process_event(WasmClipboardBackendMessage::RemoteClipboardChanged { generation: 0, formats })
+             .unwrap();
+ 
+         match rx.try_recv() {
+@@ -1735,7 +1768,7 @@
+             file_list_format(0xC080),
+         ];
+         clipboard
+-            .process_event(WasmClipboardBackendMessage::RemoteClipboardChanged(formats))
++            .process_event(WasmClipboardBackendMessage::RemoteClipboardChanged { generation: 0, formats })
+             .unwrap();
+ 
+         // Step 2: Should get SendInitiatePaste for text first

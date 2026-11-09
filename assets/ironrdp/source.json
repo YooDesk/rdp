@@ -2,17 +2,18 @@
   "upstream": "https://github.com/Devolutions/IronRDP",
   "commit": "11a0810cfbbabd8b8023875a05e3041216d4b01b",
   "source_tree_sha256": "1210732fa81cfe7c92493b8d7dcde6a59503fc1b26d1134f0bb60780af6ea3c5",
-  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
   "wasm_bindgen": "0.2.126",
-  "workspace_adaptation": "only browser member; omit FFI-only Diplomat patch; YooDesk RDPSND PCM callback adapter",
+  "workspace_adaptation": "only browser member; omit FFI-only Diplomat patch; YooDesk RDPSND PCM adapter and CLIPRDR read sequencing",
   "patches": {
-    "ironrdp-audio.patch": "f4172b43521166e00de54b7a12a7138cfd96afb73735d4b91bc5733627ae99c7"
+    "ironrdp-audio.patch": "f4172b43521166e00de54b7a12a7138cfd96afb73735d4b91bc5733627ae99c7",
+    "ironrdp-clipboard.patch": "013bdf805b55a5ac6bc4222ae0c2444f2f8bdc463214d6ee180270a8f6ecd453"
   },
   "files": {
-    "ironrdp.d.ts": "a6a9a3c4e4ea9e0b585d431eace9cfe4823adf265ad0dbd520e03869ab01c77c",
-    "ironrdp.js": "49d541007c85917704178e3e018af84e77b2e182494686c9aaaac41a58534608",
-    "ironrdp_bg.wasm": "fb6224f85a740c52c2807e238d28e700cb25963f5ffadf70bca802aafdbb2adc",
-    "ironrdp_bg.wasm.d.ts": "df0715ed8fd457f2e1f4e7b9906e5182aabdfd7a1a9316eac8ba8a0fb6d2d7f0",
+    "ironrdp.d.ts": "9dd7d1c8a357b87adefb102f6720e9502359ecc160f9344ffa7ddf99f7f91008",
+    "ironrdp.js": "778cf3018c33183e28b00480150952d349c0f7e416f589b4ee299d40ebd63145",
+    "ironrdp_bg.wasm": "551dcf4897a5776d9b357fd3f55f6534b644a8db2a65f065b462fdd77ca07f56",
+    "ironrdp_bg.wasm.d.ts": "77027cd25d95b12f55a6cb421f0c12827c9b2c3dec5239ca2beaabbca525fda8",
     "LICENSE-APACHE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
     "LICENSE-MIT": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
   }
