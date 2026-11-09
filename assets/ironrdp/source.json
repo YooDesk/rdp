@@ -15,6 +15,7 @@
     "ironrdp_bg.wasm": "551dcf4897a5776d9b357fd3f55f6534b644a8db2a65f065b462fdd77ca07f56",
     "ironrdp_bg.wasm.d.ts": "77027cd25d95b12f55a6cb421f0c12827c9b2c3dec5239ca2beaabbca525fda8",
     "LICENSE-APACHE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-    "LICENSE-MIT": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    "LICENSE-MIT": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+    "ironrdp_bg.wasm.gz": "328116033f503a821be5a00cc869676085f404d3bcead282dd6371f98b644dbb"
   }
 }

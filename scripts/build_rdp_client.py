@@ -1,5 +1,6 @@
 """从固定IronRDP源码构建浏览器WASM；隔离FFI工具链，不修改参考源码或产品名称。"""
 import argparse
+import gzip
 import hashlib
 import io
 import tarfile
@@ -32,6 +33,13 @@ def main():
             with tarfile.open(fileobj=io.BytesIO(data)) as archive:
                 archive.extractall(temp, filter='data')
         build_client(args, args.source.resolve(strict=True) if args.source else Path(temp))
+
+
+def compress_wasm(output):
+    wasm = output / 'ironrdp_bg.wasm'
+    with wasm.open('rb') as source, wasm.with_suffix('.wasm.gz').open('wb') as destination:
+        with gzip.GzipFile(filename='', mode='wb', fileobj=destination, mtime=0) as compressed:
+            shutil.copyfileobj(source, compressed)
 
 
 def build_client(args, source):
@@ -80,6 +88,7 @@ def build_client(args, source):
     output = ROOT / 'assets/ironrdp'
     output.mkdir(parents=True, exist_ok=True)
     subprocess.run([str(tool), str(build / 'target/wasm32-unknown-unknown/production-wasm/ironrdp_web.wasm'), '--target', 'web', '--out-dir', str(output), '--out-name', 'ironrdp'], check=True)
+    compress_wasm(output)
     for name in ['LICENSE-MIT', 'LICENSE-APACHE']:
         shutil.copyfile(source / name, output / name)
     files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in output.iterdir() if p.is_file() and p.name != 'source.json'}

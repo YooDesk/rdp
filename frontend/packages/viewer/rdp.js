@@ -409,13 +409,28 @@ async function connect(credentials, automatic = false) {
     modulePromise ||= (
       viewer ? viewer.module(moduleURL) : import(/* @vite-ignore */ moduleURL.href)
     ).then(async (m) => {
-      if (viewer) {
-        const wasm = await fetch(new URL('ironrdp_bg.wasm', assetBase));
+      let wasm;
+      if (typeof DecompressionStream === 'function') {
+        const compressed = await fetch(new URL('ironrdp_bg.wasm.gz', assetBase));
+        if (compressed.ok && compressed.body) {
+          // The viewer bridge returns a synthetic response, so decode this asset explicitly.
+          wasm = new Response(compressed.body.pipeThrough(new DecompressionStream('gzip')), {
+            headers: { 'Content-Type': 'application/wasm' },
+          });
+        } else if (compressed.status !== 404) {
+          throw new Error('RDP decoder unavailable');
+        }
+      }
+      if (!wasm) {
+        wasm = await fetch(new URL('ironrdp_bg.wasm', assetBase));
         if (!wasm.ok) throw new Error('RDP decoder unavailable');
-        await m.default({ module_or_path: await wasm.arrayBuffer() });
-      } else await m.default();
+      }
+      await m.default({ module_or_path: wasm });
       m.setup('warn');
       return m;
+    }).catch((error) => {
+      modulePromise = null;
+      throw error;
     });
     iron = await modulePromise;
     if (gen !== generation) return;
